@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "es6",
+    "module": "nodenext",
+    "outDir": "./dist",
+    "moduleResolution": "node16",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowJs": true,
+    "checkJs": false
+    // "paths": {
+    //   "@lib/*": ["./lib/*"]
+    // }
+  },
+  "baseUrl": ".",
+  "include": ["lib/**/*.ts", "lib/**/*.js", "index.ts"],
+  "exclude": ["node_modules", "dist", "certificates"]
+}

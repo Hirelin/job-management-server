@@ -1,0 +1,278 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id String @id @default(cuid())
+
+  name  String?
+  email String  @unique
+  image String  @default("/images/profile-default.jpg")
+
+  emailVerified DateTime?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  recruiter    Recruiter?
+  accounts     Account[]
+  sessions     Session[]
+  applications Application[]
+  uploads     Uploads[]
+}
+
+model Account {
+  id String @id @default(cuid())
+
+  userId            String      @map("user_id")
+  type              AccountType @default(oauth)
+  provider          String
+  providerAccountId String      @map("provider_account_id")
+
+  accessToken  String? @map("access_token")
+  refreshToken String? @map("refresh_token")
+
+  expiresAt     Int?    @map("expires_at")
+  tokenType     String? @map("token_type")
+  id_token      String? @map("id_token")
+  session_state String? @map("session_state")
+  scope         String? @map("scope")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model Session {
+  id String @id @default(cuid())
+
+  sessionToken String   @unique @map("session_token")
+  refreshToken String   @unique @map("refresh_token")
+  expires      DateTime @map("expires_at")
+
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+}
+
+model VerificationToken {
+  identifier String   @map("identifier")
+  token      String   @map("token")
+  expires    DateTime @map("expires_at")
+
+  @@id([identifier, token])
+  @@index([identifier, token])
+}
+
+model Recruiter {
+  id String @id @default(cuid())
+
+  name         String
+  position     String
+  organization String
+  phone        String?
+  address      String?
+
+  userId String @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  jobOpenings JobOpening[]
+}
+
+model JobOpening {
+  id String @id @default(cuid())
+
+  title       String
+  company     String
+  location    String?
+  type        JobType
+  description String
+  contact     String
+  address     String?
+
+  status      JobStatus @default(upcoming)
+  deadline    DateTime? @map("deadline")
+
+// training
+  startDate DateTime? @map("start_date")
+  endDate   DateTime? @map("end_date")
+
+  requirementsFileId String?  @map("requirements_file_id")
+  requirements     Uploads? @relation(fields: [requirementsFileId], references: [id])
+
+  // parsed by pipeline
+  parsedRequirements String? @map("parsed_requirements")
+
+  // training stage
+  trainingId String? @map("training_id")
+  training   Training? @relation(fields: [trainingId], references: [id])
+
+  recruiterId String    @map("recruiter_id")
+  recruiter   Recruiter @relation(fields: [recruiterId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  applications Application[]
+
+  @@index([recruiterId])
+}
+
+model Application {
+  id String @id @default(cuid())
+
+  status ApplicationStatus @default(pending)
+
+  jobOpeningId String     @map("job_opening_id")
+  jobOpening   JobOpening @relation(fields: [jobOpeningId], references: [id], onDelete: Cascade)
+
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // stage 1: resume parsing
+  parsedResume String? @map("parsed_resume")
+  // stage 2: scoring
+  layoutScore  Float   @default(0.0) @map("layout_score")
+  contentScore Float   @default(0.0) @map("content_score")
+  // stage 3: skill gap analysis
+  skillGap     String? @map("skill_gap") // contains skill gap json as well as score
+
+  // stage 4: learning
+  learningPlan LearningPlan?
+
+  resumeId String?  @map("resume_id")
+  resume   Uploads? @relation(fields: [resumeId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([jobOpeningId])
+  @@index([userId])
+}
+
+model Uploads {
+  id String @id @default(cuid())
+
+  uploadType UploadType
+
+  name     String
+  filetype String @map("file_type")
+  url      String
+
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  Application Application[]
+  jobOpening  JobOpening[]
+}
+
+model Training {
+  id String @id @default(cuid())
+
+  topics      String @map("topics")
+  startDate   DateTime? @map("start_date")
+  endDate     DateTime? @map("end_date")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  jobOpening JobOpening[]
+  learningPlan LearningPlan[]
+}
+
+model LearningPlan {
+  id String @id @default(cuid())
+
+  // JSON field to store learning plan details
+  planDetails Json @map("plan_details")
+  
+  // One-to-one relation with Application
+  applicationId String @unique @map("application_id")
+  application Application @relation(fields: [applicationId], references: [id])
+
+  trainingId String @map("training_id")
+  training Training @relation(fields: [trainingId], references: [id])
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  assessments Assessment[]
+}
+
+model Assessment {
+  id String @id @default(cuid())
+
+  title       String
+  description String?
+  questions   Json
+
+  learningPlanId String @map("learning_plan_id")
+  learningPlan   LearningPlan @relation(fields: [learningPlanId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  
+  @@index([learningPlanId])
+}
+
+enum AccountType {
+  oauth
+  email
+  credentials
+}
+
+enum ApplicationStatus {
+  pending
+  rejected
+  accepted
+  training
+  hired
+}
+
+enum UploadType {
+  resume
+  jobDescription
+  requirements
+}
+
+enum JobType {
+  fullTime
+  partTime
+  contract
+  internship
+  freelance
+  temporary
+  volunteer
+  remote
+  onSite
+  hybrid
+}
+
+enum JobStatus {
+  upcoming
+  open
+  closed
+  cancelled
+  completed
+}
