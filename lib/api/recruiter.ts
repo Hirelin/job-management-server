@@ -9,6 +9,8 @@ import { getCookies, getSessionContext } from "../utils/utils";
 import { pushEvent } from "../db/redis";
 import { Event } from "../utils/types";
 import { EventType, SESSION_TOKEN_NAME } from "../utils/constants";
+import { uploadFile } from "../utils/upload";
+import { success } from "zod/v4";
 
 const router = express.Router();
 
@@ -33,54 +35,21 @@ router.post("/create", fileUpload("requiremetsFile"), async (req, res) => {
   let uploadId: string | null = null;
 
   if (file) {
-    const formData = new FormData();
-    // parser file
-    if (file && file.buffer) {
-      const blob = new Blob([file.buffer], { type: file.mimetype });
-      formData.append("file", blob, file.originalname);
-    }
-    formData.append("bucket", UploadType.requirements);
+    const fileUpload = await uploadFile(
+      file,
+      UploadType.requirements,
+      session.data.id
+    );
 
-    // TODO: secure requests
-    // upload file
-    const fileUpload = await fetch(`${env.SERVER_URL}/api/files/upload`, {
-      method: "POST",
-      body: formData,
-    });
-
-    // create file
-    if (fileUpload.status !== 201) {
-      return res.status(fileUpload.status).json({
+    if (fileUpload === null) {
+      return res.status(500).json({
         success: false,
         error: "File Upload Error",
-        message: "Failed to upload file",
-        details: await fileUpload.text(),
+        message: "Failed to upload the requirements file.",
       });
-    } else {
-      const filedata = await fileUpload.json();
-
-      try {
-        const newFile = await db.$queryRawUnsafe<any>(
-          `
-          INSERT INTO "Uploads" (name, file_type, "uploadType", url)
-          VALUES ($1, $2, $3::\"UploadType\", $4)
-          RETURNING *;
-          `,
-          file.originalname,
-          file.mimetype,
-          UploadType.requirements,
-          filedata.file.url
-        );
-        uploadId = newFile.id;
-      } catch (error) {
-        return res.status(fileUpload.status).json({
-          success: false,
-          error: "File Upload Error",
-          message: "Failed to upload file",
-          details: await fileUpload.text(),
-        });
-      }
     }
+
+    uploadId = fileUpload.uploadId;
   }
 
   // parse form
@@ -221,6 +190,8 @@ router.get("/recruiter-jobs", async (req, res) => {
       },
     });
 
+    console.log(jobList);
+
     return res.status(200).json({
       success: true,
       message: "Recruiter jobs fetched successfully",
@@ -233,8 +204,9 @@ router.get("/recruiter-jobs", async (req, res) => {
         type: job.type,
         postedDate: job.createdAt.toISOString(),
         description: job.description,
-        applicantCount: job._count.applications, // Add the applicant count
+        applicantsCount: job._count.applications, // Add the applicant count
         requirements: job.parsedRequirements || null, // Added to match interface
+        deadline: job.deadline,
       })),
     });
   } catch (error) {
@@ -249,7 +221,7 @@ router.get("/recruiter-jobs", async (req, res) => {
   }
 });
 
-router.post("/update-job-status", async (req, res) => {
+router.put("/update-job-status", async (req, res) => {
   const body = req.body as { jobId: string | null; status: string | null };
 
   if (body.jobId === null || body.status === null) {
@@ -265,12 +237,20 @@ router.post("/update-job-status", async (req, res) => {
     data: { status: body.status as JobStatus },
   });
   res.status(200).json({
+    success: true,
     message: "status updated successfully",
   });
 });
 
 router.get("/applications", async (req, res) => {
   const session = getSessionContext(req);
+  const applicationStatuses = req.query.applicationStatus as
+    | string[]
+    | string
+    | undefined;
+  const jobStatuses = req.query.jobStatus as string[] | string | undefined;
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 10;
 
   if (
     session?.status == "unauthenticated" ||
@@ -283,12 +263,41 @@ router.get("/applications", async (req, res) => {
   }
 
   try {
-    const applications = await db.application.findMany({
-      where: {
-        jobOpening: {
-          recruiterId: session?.data.recruiter?.id,
-        },
+    // Build where clause for filtering
+    const whereClause: any = {
+      jobOpening: {
+        recruiterId: session?.data.recruiter?.id,
       },
+    };
+
+    // Handle application status filtering
+    if (applicationStatuses) {
+      const statusArray = Array.isArray(applicationStatuses)
+        ? applicationStatuses
+        : [applicationStatuses];
+      whereClause.status = {
+        in: statusArray,
+      };
+    }
+
+    // Handle job status filtering
+    if (jobStatuses) {
+      const jobStatusArray = Array.isArray(jobStatuses)
+        ? jobStatuses
+        : [jobStatuses];
+      whereClause.jobOpening.status = {
+        in: jobStatusArray,
+      };
+    }
+
+    // Get total count for pagination
+    const totalCount = await db.application.count({
+      where: whereClause,
+    });
+
+    // Get applications with pagination
+    const applications = await db.application.findMany({
+      where: whereClause,
       include: {
         resume: {
           select: {
@@ -300,6 +309,7 @@ router.get("/applications", async (req, res) => {
           select: {
             id: true,
             title: true,
+            status: true,
           },
         },
         user: {
@@ -314,12 +324,22 @@ router.get("/applications", async (req, res) => {
       orderBy: {
         createdAt: "desc",
       },
+      skip: (page - 1) * limit,
+      take: limit,
     });
+
+    const hasMore = totalCount > page * limit;
 
     res.status(200).json({
       message: "Applications fetched successfully",
       status: "success",
       data: applications,
+      pagination: {
+        total: totalCount,
+        page,
+        limit,
+        hasMore,
+      },
     });
     return;
   } catch (error) {
@@ -328,6 +348,50 @@ router.get("/applications", async (req, res) => {
       error: error instanceof Error ? error.message : "Unknown error",
     });
     return;
+  }
+});
+
+router.get("/application-by-id", async (req, res) => {
+  const jobId = req.query.jobId as string | null;
+
+  if (jobId === null) {
+    return res.status(400).json({
+      message: "Job ID required",
+      success: false,
+    });
+  }
+
+  try {
+    const applications = await db.application.findMany({
+      where: { jobOpeningId: jobId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            image: true,
+          },
+        },
+        resume: {
+          select: {
+            id: true,
+            url: true,
+          },
+        },
+      },
+    });
+
+    return res.status(200).json({
+      message: "Successfully fetch job applications",
+      data: applications,
+      success: true,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to fetch applications",
+      success: false,
+    });
   }
 });
 

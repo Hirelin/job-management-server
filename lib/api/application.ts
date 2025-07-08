@@ -1,9 +1,6 @@
 import express from "express";
-import path from "path";
-import { fileUpload } from "../middleware/upload";
-import { getCookies, getSessionContext } from "../utils/utils";
+import { getSessionContext } from "../utils/utils";
 import { UploadType } from "../../generated/prisma";
-import { env } from "../env";
 import { db } from "../db/db";
 import { EventType } from "../utils/constants";
 import { Event } from "../utils/types";
@@ -11,10 +8,8 @@ import { pushEvent } from "../db/redis";
 const router = express.Router();
 
 // REST API Routes
-router.post("/apply", fileUpload("resumeFile"), async (req, res) => {
+router.post("/apply", async (req, res) => {
   const session = getSessionContext(req);
-  const cookies = getCookies(req);
-  const file = req.file;
   const data = req.body;
 
   if (session?.data?.id === undefined || session?.data?.id === null) {
@@ -33,10 +28,26 @@ router.post("/apply", fileUpload("resumeFile"), async (req, res) => {
     });
   }
 
+  const file = await db.uploads.findFirst({
+    where: {
+      id: data.resumeId,
+      userId: session.data.id,
+      uploadType: UploadType.resume,
+    },
+  });
+
+  if (data.resumeId === undefined || data.resumeId === null || file === null) {
+    return res.status(400).json({
+      success: false,
+      error: "Bad Request",
+      message: "Resume ID is required",
+    });
+  }
+
   const isApplied = await db.application.findFirst({
     where: {
       jobOpeningId: data.jobId,
-      userId: session?.data?.id,
+      userId: session.data.id,
     },
   });
 
@@ -45,65 +56,6 @@ router.post("/apply", fileUpload("resumeFile"), async (req, res) => {
       success: false,
       error: "Already Applied",
       message: "You have already applied for this job.",
-    });
-  }
-
-  let uploadId: string | null = null;
-
-  if (file) {
-    const formData = new FormData();
-    // parser file
-    if (file && file.buffer) {
-      const blob = new Blob([file.buffer], { type: file.mimetype });
-      formData.append("file", blob, file.originalname);
-    }
-    formData.append("bucket", UploadType.resume);
-
-    // TODO: secure requests
-    // upload file
-    const fileUpload = await fetch(`${env.SERVER_URL}/api/files/upload`, {
-      method: "POST",
-      body: formData,
-    });
-
-    // create file
-    if (fileUpload.status !== 201) {
-      return res.status(fileUpload.status).json({
-        success: false,
-        error: "File Upload Error",
-        message: "Failed to upload file",
-        details: await fileUpload.text(),
-      });
-    } else {
-      const filedata = await fileUpload.json();
-
-      try {
-        const newFile = await db.$queryRawUnsafe<any>(
-          `
-            INSERT INTO "Uploads" (name, file_type, "uploadType", url)
-            VALUES ($1, $2, $3::\"UploadType\", $4)
-            RETURNING *;
-            `,
-          file.originalname,
-          file.mimetype,
-          UploadType.requirements,
-          filedata.file.url
-        );
-        uploadId = newFile[0].id;
-      } catch (error) {
-        return res.status(fileUpload.status).json({
-          success: false,
-          error: "File Upload Error",
-          message: "Failed to upload file",
-          details: await fileUpload.text(),
-        });
-      }
-    }
-  } else {
-    return res.status(400).json({
-      success: false,
-      error: "File Upload Error",
-      message: "No file uploaded",
     });
   }
 
@@ -116,38 +68,42 @@ router.post("/apply", fileUpload("resumeFile"), async (req, res) => {
       RETURNING *;
       `,
     data.jobId,
-    session?.data?.id,
-    uploadId,
+    session.data.id,
+    data.resumeId,
     "pending", // default status
     0.0, // default layout_score
     0.0 // default content_score
   );
 
-  // Start ML pipeline
-  const base64File = file?.buffer
-    ? Buffer.from(file.buffer).toString("base64")
-    : null;
-
-  const eventData: Event = {
-    type: EventType.REQUIREMENTS,
-    timestamp: new Date().toISOString(),
-    session: {
-      session_id: session?.data?.id,
-      application_id: application[0].id,
-    },
-    // TODO: add necessary fields
-    data: {
-      application_id: application[0].id,
-    },
-    file: base64File ? base64File : null,
-  };
-
+  // Fetch file from URL and convert to base64
+  let base64File: string | null = null;
   try {
-    // Make sure we're passing the stringified event data
+    const response = await fetch(file.url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch file from URL: ${response.statusText}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    base64File = Buffer.from(arrayBuffer).toString("base64");
+
+    const eventData: Event = {
+      type: EventType.REQUIREMENTS,
+      timestamp: new Date().toISOString(),
+      session: {
+        session_id: session?.data?.id,
+        application_id: application[0].id,
+      },
+      // TODO: add necessary fields
+      data: {
+        application_id: application[0].id,
+      },
+      file: base64File ? base64File : null,
+    };
+
     // TODO: push event to redis
     // await pushEvent(eventData);
   } catch (error) {
-    console.error("Failed to push event to Redis:", error);
+    console.error("Error fetching or converting file to base64:", error);
+    base64File = null;
   }
 
   res.status(200).json({
