@@ -19,5 +19,7 @@ export const createJobSchema = z.object({
   description: z.string().min(1, "Job description is required"),
   contact: z.string().email("Invalid email address"),
   address: z.string(),
+
+  deadline: z.string().optional(),
   // requiremetsFile: z.any().optional(), // Note the spelling "requiremets" vs "requirements"
 });

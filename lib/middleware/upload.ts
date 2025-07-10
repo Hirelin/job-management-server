@@ -3,40 +3,43 @@ import multer from "multer";
 import { memoryStorage } from "../utils/multer";
 
 // Custom interface to extend Express Request
-interface RequestWithFile extends Request {
-  fileInfo?: {
-    originalName: string;
-    size: number;
-    mimeType: string;
-    buffer?: Buffer;
+interface RequestWithFiles extends Request {
+  filesInfo?: {
+    [fieldName: string]: {
+      originalName: string;
+      size: number;
+      mimeType: string;
+      buffer?: Buffer;
+    };
   };
 }
 
 /**
- * Creates a middleware for handling file uploads
- * @param fieldName The name of the field that contains the file
- * @param optional Whether the file is optional (default: true)
+ * Creates a middleware for handling multiple file uploads
+ * @param fields Array of field configurations
  * @param maxSize Maximum file size in bytes (default: 50MB)
  * @returns Express middleware
  */
-export const fileUpload = (
-  fieldName: string,
-  optional = true,
+export const multipleFileUpload = (
+  fields: Array<{ name: string; maxCount?: number; required?: boolean }>,
   maxSize = 50 * 1024 * 1024
 ) => {
   const upload = multer({
     storage: memoryStorage,
     limits: { fileSize: maxSize },
     fileFilter: (req, file, cb) => {
-      // You can add file type validation here if needed
       cb(null, true);
     },
-  }).single(fieldName);
+  }).fields(
+    fields.map((field) => ({
+      name: field.name,
+      maxCount: field.maxCount || 1,
+    }))
+  );
 
-  return (req: RequestWithFile, res: Response, next: NextFunction) => {
+  return (req: RequestWithFiles, res: Response, next: NextFunction) => {
     upload(req, res, (err) => {
       if (err instanceof multer.MulterError) {
-        // A multer error occurred when uploading
         console.error("Multer error:", err);
         return res.status(400).json({
           success: false,
@@ -45,7 +48,6 @@ export const fileUpload = (
           field: err.field,
         });
       } else if (err) {
-        // An unknown error occurred
         console.error("Unknown error during upload:", err);
         return res.status(500).json({
           success: false,
@@ -54,27 +56,54 @@ export const fileUpload = (
         });
       }
 
-      // No file was provided and it's required
-      if (!req.file && !optional) {
-        return res.status(400).json({
-          success: false,
-          error: "Missing File",
-          message: `The file field '${fieldName}' is required`,
-        });
+      // Check for required files
+      for (const field of fields) {
+        if (field.required) {
+          const files = (req.files as any)?.[field.name];
+          if (!files || files.length === 0) {
+            return res.status(400).json({
+              success: false,
+              error: "Missing Required File",
+              message: `The file field '${field.name}' is required`,
+            });
+          }
+        }
       }
 
-      // If file exists, add file info to request object for easy access
-      if (req.file) {
-        req.fileInfo = {
-          originalName: req.file.originalname,
-          size: req.file.size,
-          mimeType: req.file.mimetype,
-          buffer: req.file.buffer,
+      // Add files info to request object for easy access
+      if (req.files) {
+        req.filesInfo = {};
+        const files = req.files as {
+          [fieldname: string]: Express.Multer.File[];
         };
-        console.log(`File '${fieldName}' received:`, req.fileInfo.originalName);
+
+        for (const [fieldName, fileArray] of Object.entries(files)) {
+          if (fileArray && fileArray.length > 0) {
+            const file = fileArray[0]; // Take first file if multiple
+            req.filesInfo[fieldName] = {
+              originalName: file.originalname,
+              size: file.size,
+              mimeType: file.mimetype,
+              buffer: file.buffer,
+            };
+            console.log(`File '${fieldName}' received:`, file.originalname);
+          }
+        }
       }
 
       next();
     });
   };
+};
+
+// Keep the original function for backward compatibility
+export const fileUpload = (
+  fieldName: string,
+  optional = true,
+  maxSize = 50 * 1024 * 1024
+) => {
+  return multipleFileUpload(
+    [{ name: fieldName, required: !optional }],
+    maxSize
+  );
 };

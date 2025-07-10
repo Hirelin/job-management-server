@@ -1,5 +1,5 @@
 import express from "express";
-import { fileUpload } from "../middleware/upload";
+import { multipleFileUpload } from "../middleware/upload";
 import { env } from "../env";
 import { JobType, UploadType, JobStatus } from "../../generated/prisma";
 import { db } from "../db/db";
@@ -10,152 +10,225 @@ import { pushEvent } from "../db/redis";
 import { Event } from "../utils/types";
 import { EventType, SESSION_TOKEN_NAME } from "../utils/constants";
 import { uploadFile } from "../utils/upload";
-import { success } from "zod/v4";
 
 const router = express.Router();
 
 // REST API Routes
-router.post("/create", fileUpload("requiremetsFile"), async (req, res) => {
-  const file = req.file;
-  const session = getSessionContext(req);
 
-  // check session
-  if (
-    session?.data?.recruiter?.id === null ||
-    session?.data?.recruiter === undefined
-  ) {
-    return res.status(403).json({
-      success: false,
-      error: "Forbidden",
-      message: "You do not have permission to create a job.",
-    });
-  }
+router.post(
+  "/create",
+  multipleFileUpload([
+    { name: "requirementsFile", required: false },
+    { name: "layoutReferenceFile", required: true },
+  ]),
+  async (req, res) => {
+    const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+    const requirementsFile = files?.requirementsFile?.[0];
+    const layoutReferenceFile = files?.layoutReferenceFile?.[0];
 
-  let data: z.infer<typeof createJobSchema>;
-  let uploadId: string | null = null;
+    const session = getSessionContext(req);
 
-  if (file) {
-    const fileUpload = await uploadFile(
-      file,
-      UploadType.requirements,
-      session.data.id
-    );
-
-    if (fileUpload === null) {
-      return res.status(500).json({
+    // check session
+    if (
+      session?.data?.recruiter?.id === null ||
+      session?.data?.recruiter === undefined
+    ) {
+      return res.status(403).json({
         success: false,
-        error: "File Upload Error",
-        message: "Failed to upload the requirements file.",
+        error: "Forbidden",
+        message: "You do not have permission to create a job.",
       });
     }
 
-    uploadId = fileUpload.uploadId;
-  }
+    let data: z.infer<typeof createJobSchema>;
+    let requirementsUploadId: string | null = null;
+    let layoutReferenceUploadId: string | null = null;
 
-  // parse form
-  try {
-    data = createJobSchema.parse(req.body);
-  } catch (error) {
-    return res.status(400).json({
-      success: false,
-      error: "Failed to parse request body",
-      message: "Invalid request data",
-    });
-  }
+    // Handle file uploads in parallel
+    const uploadPromises: Promise<any>[] = [];
 
-  try {
-    let result: any;
-
-    // create jobopening
-    if (uploadId) {
-      result = await db.$queryRawUnsafe<any>(
-        `
-        INSERT INTO "JobOpening" 
-          (title, company, location, type, description, contact, address, "recruiter_id", "requirements_file_id" ) 
-        VALUES 
-          ($1, $2, $3, $4::\"JobType\", $5, $6, $7, $8::uuid, $9::uuid)
-        RETURNING *;
-        `,
-        data.title,
-        data.company,
-        data.location,
-        data.type,
-        data.description,
-        data.contact,
-        data.address,
-        session.data.recruiter?.id,
-        uploadId
-      );
-
-      // TODO: queue file for parsing
-    } else {
-      result = await db.$queryRawUnsafe<any>(
-        `
-        INSERT INTO "JobOpening" 
-          (title, company, location, type, description, contact, address, "recruiter_id") 
-        VALUES 
-          ($1, $2, $3, $4::\"JobType\", $5, $6, $7, $8::uuid)
-        RETURNING *;
-        `,
-        data.title,
-        data.company,
-        data.location,
-        data.type,
-        data.description,
-        data.contact,
-        data.address,
-        session.data.recruiter?.id ?? "0"
+    if (requirementsFile) {
+      uploadPromises.push(
+        uploadFile(
+          requirementsFile,
+          UploadType.requirements,
+          session.data.id
+        ).then((fileUpload) => ({ type: "requirements", result: fileUpload }))
       );
     }
 
-    // Push to redis
-    const cookies = getCookies(req);
-    const sessionId = cookies?.[SESSION_TOKEN_NAME] || "";
+    if (layoutReferenceFile) {
+      uploadPromises.push(
+        uploadFile(
+          layoutReferenceFile,
+          UploadType.layoutTemplate,
+          session.data.id
+        ).then((fileUpload) => ({ type: "layoutTemplate", result: fileUpload }))
+      );
+    }
 
-    const base64File = file?.buffer
-      ? Buffer.from(file.buffer).toString("base64")
-      : null;
+    // Wait for all uploads to complete
+    if (uploadPromises.length > 0) {
+      try {
+        const uploadResults = await Promise.all(uploadPromises);
 
-    const eventData: Event = {
-      type: EventType.REQUIREMENTS,
-      timestamp: new Date().toISOString(),
-      session: {
-        session_id: sessionId,
-        job_id: result[0].id,
-      },
-      data: {
-        title: data.title,
-        description: data.description,
-      },
-      file: base64File ? base64File : null,
-    };
+        for (const upload of uploadResults) {
+          if (upload.result === null) {
+            return res.status(500).json({
+              success: false,
+              error: "File Upload Error",
+              message: `Failed to upload the ${upload.type} file.`,
+            });
+          }
+
+          if (upload.type === "requirements") {
+            // Use the URL or extract ID from URL if uploadId is undefined
+            requirementsUploadId = upload.result.uploadId || upload.result.url;
+          } else if (upload.type === "layoutTemplate") {
+            // Use the URL or extract ID from URL if uploadId is undefined
+            layoutReferenceUploadId =
+              upload.result.uploadId || upload.result.url;
+          }
+        }
+      } catch (error) {
+        return res.status(500).json({
+          success: false,
+          error: "File Upload Error",
+          message: "Failed to upload files.",
+        });
+      }
+    }
+
+    // parse form
+    try {
+      data = createJobSchema.parse(req.body);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: "Failed to parse request body",
+        message: "Invalid request data",
+      });
+    }
 
     try {
-      // Make sure we're passing the stringified event data
-      await pushEvent(eventData);
-    } catch (error) {
-      console.error("Failed to push event to Redis:", error);
-    }
+      let result: any;
 
-    res.status(200).json({
-      message: "Job created successfully",
-      data: {
-        file: file ? file.originalname : null,
-        ...data,
-      },
-      job: result,
-      // file: await fileUpload.json(),
-    });
-  } catch (error) {
-    console.error("Database error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Database Error",
-      message: "Failed to create job in database",
-      details: error instanceof Error ? error.message : String(error),
-    });
+      // console.log(layoutReferenceUploadId, requirementsUploadId);
+      console.log(data.deadline);
+
+      // create jobopening with both files
+      if (requirementsUploadId && layoutReferenceUploadId) {
+        result = await db.$queryRawUnsafe<any>(
+          `
+          INSERT INTO "JobOpening"
+            (title, company, location, type, description, contact, address, "recruiter_id", "requirements_file_id", "layout_template_id", "deadline")
+          VALUES
+            ($1, $2, $3, $4::"JobType", $5, $6, $7, $8::uuid, $9::uuid, $10::uuid, $11::date)
+          RETURNING *;
+          `,
+          data.title,
+          data.company,
+          data.location,
+          data.type,
+          data.description,
+          data.contact,
+          data.address,
+          session.data.recruiter?.id,
+          requirementsUploadId,
+          layoutReferenceUploadId,
+          data.deadline
+        );
+      } else if (layoutReferenceUploadId) {
+        // Only layout reference file
+        result = await db.$queryRawUnsafe<any>(
+          `
+          INSERT INTO "JobOpening"
+            (title, company, location, type, description, contact, address, "recruiter_id", "layout_template_id", "deadline")
+          VALUES
+            ($1, $2, $3, $4::"JobType", $5, $6, $7, $8::uuid, $9::uuid, $10::date)
+          RETURNING *;
+          `,
+          data.title,
+          data.company,
+          data.location,
+          data.type,
+          data.description,
+          data.contact,
+          data.address,
+          session.data.recruiter?.id,
+          layoutReferenceUploadId,
+          data.deadline
+        );
+      } else {
+        // No files case - this shouldn't happen since layoutReferenceFile is required
+        return res.status(400).json({
+          success: false,
+          error: "Missing Required File",
+          message: "Layout reference file is required.",
+        });
+      }
+
+      // Check if result is empty
+      if (!result || result.length === 0) {
+        return res.status(500).json({
+          success: false,
+          error: "Database Error",
+          message: "Failed to create job - no data returned.",
+        });
+      }
+
+      // Push to redis - you might want to include both files
+      const cookies = getCookies(req);
+      const sessionId = cookies?.[SESSION_TOKEN_NAME] || "";
+
+      const requirementsBase64 = requirementsFile?.buffer
+        ? Buffer.from(requirementsFile.buffer).toString("base64")
+        : null;
+
+      const eventData: Event = {
+        type: EventType.REQUIREMENTS,
+        timestamp: new Date().toISOString(),
+        session: {
+          session_id: sessionId,
+          job_id: result[0].id,
+        },
+        data: {
+          title: data.title,
+          description: data.description,
+        },
+        file: requirementsBase64,
+      };
+
+      try {
+        await pushEvent(eventData);
+      } catch (error) {
+        console.error("Failed to push event to Redis:", error);
+      }
+
+      res.status(200).json({
+        message: "Job created successfully",
+        data: {
+          requirementsFile: requirementsFile
+            ? requirementsFile.originalname
+            : null,
+          layoutReferenceFile: layoutReferenceFile
+            ? layoutReferenceFile.originalname
+            : null,
+          ...data,
+        },
+        job: result,
+      });
+    } catch (error) {
+      console.error("Database error:", error);
+      res.status(500).json({
+        success: false,
+        error: "Database Error",
+        message: "Failed to create job in database",
+        details: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
-});
+);
 
 router.get("/recruiter-jobs", async (req, res) => {
   const session = getSessionContext(req);
@@ -390,6 +463,202 @@ router.get("/application-by-id", async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       message: "Failed to fetch applications",
+      success: false,
+    });
+  }
+});
+
+router.get("/job-by-id", async (req, res) => {
+  const jobId = req.query.jobId as string | null;
+
+  if (jobId === null) {
+    res.status(400).json({
+      message: "Job ID required",
+      success: false,
+    });
+    return;
+  }
+
+  const job = await db.jobOpening.findFirst({
+    where: { id: jobId },
+    include: {
+      requirements: {
+        select: {
+          id: true,
+          name: true,
+          url: true,
+          filetype: true,
+        },
+      },
+      layoutTemplate: {
+        select: {
+          id: true,
+          name: true,
+          url: true,
+          filetype: true,
+        },
+      },
+      recruiter: {
+        select: {
+          id: true,
+          name: true,
+          organization: true,
+          position: true,
+          user: {
+            select: {
+              email: true,
+              image: true,
+            },
+          },
+        },
+      },
+      applications: {
+        select: {
+          id: true,
+          status: true,
+          createdAt: true,
+          contentScore: true,
+          layoutScore: true,
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              image: true,
+            },
+          },
+          resume: {
+            select: {
+              id: true,
+              url: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  return res.status(200).json({
+    message: "Successfully fetched job",
+    data: job,
+    success: true,
+  });
+});
+
+router.put("/update-job", async (req, res) => {
+  const jobId = req.query.jobId as string | null;
+  const body = req.body;
+
+  if (jobId === null) {
+    return res.status(400).json({
+      message: "Job ID is required",
+      success: false,
+    });
+  }
+
+  try {
+    const updatedJob = await db.jobOpening.update({
+      where: { id: jobId },
+      data: {
+        title: body.title,
+        company: body.company,
+        location: body.location,
+        type: body.type as JobType,
+        description: body.description,
+        contact: body.contact,
+        address: body.address,
+        deadline: body.deadline ? new Date(body.deadline) : null,
+        status: body.status as JobStatus,
+        startDate: body.startDate ? new Date(body.startDate) : null,
+        endDate: body.endDate ? new Date(body.endDate) : null,
+      },
+    });
+
+    res.status(200).json({
+      message: "Job updated successfully",
+      data: updatedJob,
+      success: true,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to update job",
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+router.post("/shortlist-candidates", async (req, res) => {
+  const body = req.body as {
+    shortlistCount: number | null;
+    jobId: string | null;
+  };
+
+  if (body.jobId === null || body.shortlistCount === null) {
+    return res.status(400).json({
+      message: "Job ID and shortlist count are required",
+      success: false,
+    });
+  }
+
+  try {
+    const isShortlisted = await db.application.findFirst({
+      where: {
+        jobOpeningId: body.jobId,
+        status: {
+          not: "pending",
+        },
+      },
+    });
+
+    if (isShortlisted) {
+      return res.status(400).json({
+        message: "Shortlisting is already done for this job",
+        success: false,
+      });
+    }
+
+    let applications = await db.application.findMany({
+      where: {
+        jobOpeningId: body.jobId,
+      },
+    });
+
+    applications = applications.sort((a, b) => {
+      return b.contentScore + b.layoutScore - (a.contentScore + a.layoutScore);
+    });
+
+    applications = applications.slice(0, body.shortlistCount);
+
+    const updatedApplications = await db.application.updateMany({
+      where: {
+        id: {
+          in: applications.map((app) => app.id),
+        },
+      },
+      data: {
+        status: "accepted",
+      },
+    });
+
+    if (updatedApplications.count === 0) {
+      return res.status(400).json({
+        message: "No applications were shortlisted",
+        success: false,
+      });
+    }
+
+    res.status(200).json({
+      message: `Shortlisted ${updatedApplications.count} candidates successfully`,
+      data: {
+        shortlistedCount: updatedApplications.count,
+        jobId: body.jobId,
+      },
+      success: true,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to shortlist candidates",
+      error: error instanceof Error ? error.message : "Unknown error",
       success: false,
     });
   }

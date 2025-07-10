@@ -44,7 +44,7 @@ export async function uploadFile(
     );
 
     return {
-      uploadId: newFile.id,
+      uploadId: newFile[0].id,
       url: filedata.file.url,
       buffer: buffer,
     };

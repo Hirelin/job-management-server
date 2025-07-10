@@ -1,8 +1,8 @@
 import express from "express";
-import { getSessionContext } from "../utils/utils";
+import { getCookies, getSessionContext } from "../utils/utils";
 import { UploadType } from "../../generated/prisma";
 import { db } from "../db/db";
-import { EventType } from "../utils/constants";
+import { EventType, SESSION_TOKEN_NAME } from "../utils/constants";
 import { Event } from "../utils/types";
 import { pushEvent } from "../db/redis";
 const router = express.Router();
@@ -84,23 +84,59 @@ router.post("/apply", async (req, res) => {
     }
     const arrayBuffer = await response.arrayBuffer();
     base64File = Buffer.from(arrayBuffer).toString("base64");
+    const cookies = getCookies(req);
+    const sessionId = cookies?.[SESSION_TOKEN_NAME] || "";
+
+    const jobOpening = await db.jobOpening.findFirst({
+      where: { id: data.jobId },
+      include: {
+        layoutTemplate: {
+          select: {
+            id: true,
+            url: true,
+          },
+        },
+      },
+    });
+
+    const templateUrl = jobOpening?.layoutTemplate?.url || "";
+    let templateBase64: string | null = null;
+    if (templateUrl) {
+      try {
+        const templateResponse = await fetch(templateUrl);
+        if (!templateResponse.ok) {
+          throw new Error(
+            `Failed to fetch template file: ${templateResponse.statusText}`
+          );
+        }
+        const templateArrayBuffer = await templateResponse.arrayBuffer();
+        templateBase64 = Buffer.from(templateArrayBuffer).toString("base64");
+      } catch (err) {
+        console.error(
+          "Error fetching or converting template file to base64:",
+          err
+        );
+        templateBase64 = null;
+      }
+    }
 
     const eventData: Event = {
-      type: EventType.REQUIREMENTS,
+      type: EventType.SKILL_GAP,
       timestamp: new Date().toISOString(),
       session: {
-        session_id: session?.data?.id,
+        session_id: sessionId,
         application_id: application[0].id,
       },
       // TODO: add necessary fields
       data: {
-        application_id: application[0].id,
+        job_description: jobOpening?.parsedRequirements,
+        reference_pdf: templateBase64,
       },
-      file: base64File ? base64File : null,
+      file: base64File,
     };
 
     // TODO: push event to redis
-    // await pushEvent(eventData);
+    await pushEvent(eventData);
   } catch (error) {
     console.error("Error fetching or converting file to base64:", error);
     base64File = null;

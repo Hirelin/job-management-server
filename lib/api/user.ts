@@ -2,7 +2,7 @@ import express from "express";
 import path from "path";
 import { getSessionContext } from "../utils/utils";
 import { db } from "../db/db";
-import { fileUpload } from "../middleware/upload";
+import { fileUpload, multipleFileUpload } from "../middleware/upload";
 import { uploadFile } from "../utils/upload";
 import { UploadType } from "../../generated/prisma";
 const router = express.Router();
@@ -78,42 +78,54 @@ router.get("/resume-list", async (req, res) => {
   }
 });
 
-router.post("/upload-resume", fileUpload("resumeFile"), async (req, res) => {
-  const file = req.file;
-  const session = getSessionContext(req);
+router.post(
+  "/upload-resume",
+  multipleFileUpload([
+    {
+      name: "resumeFile",
+      required: true,
+    },
+  ]),
+  async (req, res) => {
+    const fileList = req.files as {
+      [fieldname: string]: Express.Multer.File[];
+    };
+    const file = fileList["resumeFile"]?.[0];
+    const session = getSessionContext(req);
 
-  if (file === undefined || file === null) {
-    return res.status(400).json({
-      message: "No file uploaded",
-      error: "File is required",
-    });
+    if (file === undefined || file === null) {
+      return res.status(400).json({
+        message: "No file uploaded",
+        error: "File is required",
+      });
+    }
+
+    if (session?.data?.id === undefined || session?.data?.id === null) {
+      return res.status(401).json({
+        message: "Unauthorized",
+        error: "You must be logged in to upload a resume.",
+      });
+    }
+
+    try {
+      const newResume = await uploadFile(
+        file,
+        UploadType.resume,
+        session.data.id
+      );
+
+      res.status(201).json({
+        message: "Resume uploaded successfully",
+        data: newResume,
+      });
+    } catch (error) {
+      res.status(500).json({
+        message: "Failed to upload resume",
+        error: error,
+      });
+    }
   }
-
-  if (session?.data?.id === undefined || session?.data?.id === null) {
-    return res.status(401).json({
-      message: "Unauthorized",
-      error: "You must be logged in to upload a resume.",
-    });
-  }
-
-  try {
-    const newResume = await uploadFile(
-      file,
-      UploadType.resume,
-      session.data.id
-    );
-
-    res.status(201).json({
-      message: "Resume uploaded successfully",
-      data: newResume,
-    });
-  } catch (error) {
-    res.status(500).json({
-      message: "Failed to upload resume",
-      error: error,
-    });
-  }
-});
+);
 
 router.get("/profile", async (req, res) => {
   const session = getSessionContext(req);

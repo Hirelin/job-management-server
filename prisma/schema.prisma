@@ -111,15 +111,17 @@ model JobOpening {
   status      JobStatus @default(upcoming)
   deadline    DateTime? @map("deadline")
 
-// training
+  // training
   startDate DateTime? @map("start_date")
   endDate   DateTime? @map("end_date")
 
   requirementsFileId String?  @map("requirements_file_id")
-  requirements     Uploads? @relation(fields: [requirementsFileId], references: [id])
-
+  requirements     Uploads? @relation("JobOpeningRequirements", fields: [requirementsFileId], references: [id])
   // parsed by pipeline
   parsedRequirements String? @map("parsed_requirements")
+
+  layoutTemplateId String? @map("layout_template_id")
+  layoutTemplate   Uploads? @relation("JobOpeningLayoutTemplate", fields: [layoutTemplateId], references: [id])
 
   // training stage
   trainingId String? @map("training_id")
@@ -156,7 +158,7 @@ model Application {
   skillGap     String? @map("skill_gap") // contains skill gap json as well as score
 
   // stage 4: learning
-  learningPlan LearningPlan?
+  learningPlan LearningPlan[]
 
   resumeId String?  @map("resume_id")
   resume   Uploads? @relation(fields: [resumeId], references: [id])
@@ -184,7 +186,8 @@ model Uploads {
   updatedAt DateTime @default(now()) @map("updated_at")
 
   Application Application[]
-  jobOpening  JobOpening[]
+  jobOpeningRequirements  JobOpening[] @relation("JobOpeningRequirements")
+  jobOpeningLayoutTemplate JobOpening[] @relation("JobOpeningLayoutTemplate")
 }
 
 model Training {
@@ -252,8 +255,8 @@ enum ApplicationStatus {
 
 enum UploadType {
   resume
-  jobDescription
   requirements
+  layoutTemplate
 }
 
 enum JobType {

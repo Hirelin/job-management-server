@@ -13,12 +13,12 @@ const router = express.Router();
 
 router.use(apiRouter);
 router.use(jobsRouter);
+router.use(authMiddleware).use("/pipeline_result", pipelineRouter);
+router.use(authMiddleware).use(applicationRouter);
+router.use(authMiddleware).use("/user", userRouter);
 router
   .use(authMiddleware)
   .use(recruiterMiddleware)
   .use("/recruiter", recruiterRouter);
-router.use(authMiddleware).use("/pipeline_result", pipelineRouter);
-router.use(authMiddleware).use(applicationRouter);
-router.use(authMiddleware).use("/user", userRouter);
 
 export { router as rootRouter };
